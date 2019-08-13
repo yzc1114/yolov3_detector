@@ -5,6 +5,7 @@ from functools import reduce
 from PIL import Image
 import numpy as np
 from matplotlib.colors import rgb_to_hsv, hsv_to_rgb
+import cv2
 
 def compose(*funcs):
     """Compose arbitrarily many functions, evaluated left to right.
@@ -119,3 +120,74 @@ def get_random_data(annotation_line, input_shape, random=True, max_boxes=20, jit
         box_data[:len(box)] = box
 
     return image_data, box_data
+
+
+def get_moving_boxes(prev_image, image):
+    frame_lwpCV = image
+    background = prev_image
+    # 对帧进行预处理，先转灰度图，再进行高斯滤波。
+    # 用高斯滤波进行模糊处理，进行处理的原因：每个输入的视频都会因自然震动、光照变化或者摄像头本身等原因而产生噪声。对噪声进行平滑是为了避免在运动和跟踪时将其检测出来。
+    gray_lwpCV = cv2.cvtColor(frame_lwpCV, cv2.COLOR_BGR2GRAY)
+    gray_lwpCV = cv2.GaussianBlur(gray_lwpCV, (21, 21), 0)
+
+    # 将第一帧设置为整个输入的背景
+    if background is None:
+        return None
+    # 对于每个从背景之后读取的帧都会计算其与背景之间的差异，并得到一个差分图（different map）。
+    # 还需要应用阈值来得到一幅黑白图像，并通过下面代码来膨胀（dilate）图像，从而对孔（hole）和缺陷（imperfection）进行归一化处理
+    diff = cv2.absdiff(background, gray_lwpCV)
+    diff = cv2.threshold(diff, 25, 255, cv2.THRESH_BINARY)[1]  # 二值化阈值处理
+    es = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9, 4))
+    diff = cv2.dilate(diff, es, iterations=2)  # 形态学膨胀
+
+    # 显示矩形框
+    image, contours, hierarchy = cv2.findContours(diff.copy(), cv2.RETR_EXTERNAL,
+                                                  cv2.CHAIN_APPROX_SIMPLE)  # 该函数计算一幅图像中目标的轮廓
+    boxes = []
+    for c in contours:
+        if cv2.contourArea(c) < 1500:  # 对于矩形区域，只显示大于给定阈值的轮廓，所以一些微小的变化不会显示。对于光照不变和噪声低的摄像头可不设定轮廓最小尺寸的阈值
+            continue
+        (x, y, w, h) = cv2.boundingRect(c)  # 该函数计算矩形的边界框
+        boxes.append((x, y, w, h))
+    return boxes
+
+
+def get_out_boxes_velocities(prev_info, curr_info, threshold, interval):
+    curr_boxes, curr_classes = curr_info
+    velocities = []
+    for i in range(len(curr_boxes)):
+        velocities.append(get_moving_speed(prev_info, curr_boxes[i], curr_classes[i], threshold, interval))
+    return velocities
+
+
+def get_moving_speed(prev_info, curr_box, curr_class, threshold, interval):
+    prev_boxes, prev_classes = prev_info
+    closest_moving_box = None
+    similarity = 9999
+    for i in range(len(prev_boxes)):
+        ts = get_rec_similarity(prev_boxes[i], curr_box)
+        if ts < similarity and curr_class == prev_classes[i]:
+            similarity = ts
+            closest_moving_box = prev_boxes[i]
+
+    def get_center(box):
+        return box[0] + 0.5 * box[2], box[1] + 0.5 * box[3]
+
+    if similarity < threshold:
+        prev_center = get_center(closest_moving_box)
+        curr_center = get_center(curr_box)
+        distance = np.sqrt((prev_center[0] - curr_center[0]) ** 2 + (prev_center[1] - curr_center[1]) ** 2)
+        speed = distance / interval
+        direction = get_speed_direction(prev_center, curr_center)
+        return speed, direction
+    return 0, ""
+
+
+def get_speed_direction(prev_center, curr_center):
+    return ""
+
+
+def get_rec_similarity(rec1, rec2):
+    (x1, y1, w1, h1) = rec1
+    (x2, y2, w2, h2) = rec2
+    return ((x1-x2) ** 2 + (y1-y2) ** 2 + (w1-w2) ** 2 + (h1-h2) ** 2) / 4

@@ -14,8 +14,9 @@ from keras.layers import Input
 from PIL import Image, ImageFont, ImageDraw
 
 from yolo3.model import yolo_eval, yolo_body, tiny_yolo_body
-from yolo3.utils import letterbox_image
+from yolo3.utils import *
 import os
+import cv2
 from keras.utils import multi_gpu_model
 
 class YOLO(object):
@@ -27,6 +28,8 @@ class YOLO(object):
         "iou" : 0.45,
         "model_image_size" : (416, 416),
         "gpu_num" : 1,
+        "threshold" : 2000,
+        "interval": 1 / 24
     }
 
     @classmethod
@@ -35,6 +38,7 @@ class YOLO(object):
             return cls._defaults[n]
         else:
             return "Unrecognized attribute name '" + n + "'"
+
 
     def __init__(self, **kwargs):
         self.__dict__.update(self._defaults) # set up default values
@@ -99,7 +103,7 @@ class YOLO(object):
                 score_threshold=self.score, iou_threshold=self.iou)
         return boxes, scores, classes
 
-    def detect_image(self, image):
+    def detect_image(self, image, prev_image, prev_image_boxes, prev_image_classes):
         start = timer()
 
         if self.model_image_size != (None, None):
@@ -125,17 +129,30 @@ class YOLO(object):
             })
 
         print('Found {} boxes for {}'.format(len(out_boxes), 'img'))
+        out_boxes_velocities = None
+        # moving_boxes = YOLO.get_moving_boxes(prev_image, image)
+        if prev_image is not None and prev_image_boxes is not None:
+            threshold = YOLO.get_defaults("threshold")
+            interval = YOLO.get_defaults("interval")
+            out_boxes_velocities = get_out_boxes_velocities((prev_image_boxes, prev_image_classes),
+                                                            (out_boxes, out_classes),
+                                                            threshold,
+                                                            interval)
 
         font = ImageFont.truetype(font='font/FiraMono-Medium.otf',
                     size=np.floor(3e-2 * image.size[1] + 0.5).astype('int32'))
         thickness = (image.size[0] + image.size[1]) // 300
+        print(out_boxes_velocities)
 
         for i, c in reversed(list(enumerate(out_classes))):
             predicted_class = self.class_names[c]
             box = out_boxes[i]
+            speed, direction = 0, ""
+            if out_boxes_velocities:
+                speed, direction = out_boxes_velocities[i]
             score = out_scores[i]
 
-            label = '{} {:.2f}'.format(predicted_class, score)
+            label = '{} {:.2f} {:.2f} {}'.format(predicted_class, score, speed, direction)
             draw = ImageDraw.Draw(image)
             label_size = draw.textsize(label, font)
 
@@ -151,7 +168,6 @@ class YOLO(object):
             else:
                 text_origin = np.array([left, top + 1])
 
-            # My kingdom for a good redistributable image drawing library.
             for i in range(thickness):
                 draw.rectangle(
                     [left + i, top + i, right - i, bottom - i],
@@ -164,13 +180,13 @@ class YOLO(object):
 
         end = timer()
         print(end - start)
-        return image
+        return image, out_boxes, out_classes
 
     def close_session(self):
         self.sess.close()
 
+
 def detect_video(yolo, video_path, output_path=""):
-    import cv2
     vid = cv2.VideoCapture(video_path)
     if not vid.isOpened():
         raise IOError("Couldn't open webcam or video")
@@ -186,10 +202,13 @@ def detect_video(yolo, video_path, output_path=""):
     curr_fps = 0
     fps = "FPS: ??"
     prev_time = timer()
+    prev_image = None
+    prev_image_boxes = None
+    prev_image_classes = None
     while True:
         return_value, frame = vid.read()
         image = Image.fromarray(frame)
-        image = yolo.detect_image(image)
+        image, out_boxes, out_classes = yolo.detect_image(image, prev_image, prev_image_boxes, prev_image_classes)
         result = np.asarray(image)
         curr_time = timer()
         exec_time = curr_time - prev_time
@@ -204,6 +223,9 @@ def detect_video(yolo, video_path, output_path=""):
                     fontScale=0.50, color=(255, 0, 0), thickness=2)
         cv2.namedWindow("result", cv2.WINDOW_NORMAL)
         cv2.imshow("result", result)
+        prev_image = image
+        prev_image_boxes = out_boxes
+        prev_image_classes = out_classes
         if isOutput:
             out.write(result)
         if cv2.waitKey(1) & 0xFF == ord('q'):
