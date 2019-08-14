@@ -4,8 +4,15 @@ from functools import reduce
 
 from PIL import Image
 import numpy as np
+import math as math
 from matplotlib.colors import rgb_to_hsv, hsv_to_rgb
 import cv2
+
+CAMERA_INFO = {
+    'angel_ground': np.pi / 3,
+    'height': 300,
+}
+
 
 def compose(*funcs):
     """Compose arbitrarily many functions, evaluated left to right.
@@ -17,6 +24,7 @@ def compose(*funcs):
         return reduce(lambda f, g: lambda *a, **kw: g(f(*a, **kw)), funcs)
     else:
         raise ValueError('Composition of empty sequence not supported.')
+
 
 def letterbox_image(image, size):
     '''resize image with unchanged aspect ratio using padding'''
@@ -31,8 +39,10 @@ def letterbox_image(image, size):
     new_image.paste(image, ((w-nw)//2, (h-nh)//2))
     return new_image
 
+
 def rand(a=0, b=1):
     return np.random.rand()*(b-a) + a
+
 
 def get_random_data(annotation_line, input_shape, random=True, max_boxes=20, jitter=.3, hue=.1, sat=1.5, val=1.5, proc_img=True):
     '''random preprocessing for real-time data augmentation'''
@@ -152,42 +162,48 @@ def get_moving_boxes(prev_image, image):
     return boxes
 
 
-def get_out_boxes_velocities(prev_info, curr_info, threshold, interval):
+def get_out_boxes_velocities(prev_info, curr_info, threshold, interval, image_size):
     curr_boxes, curr_classes = curr_info
     velocities = []
     for i in range(len(curr_boxes)):
-        velocities.append(get_moving_speed(prev_info, curr_boxes[i], curr_classes[i], threshold, interval))
+        velocities.append(get_moving_speed(prev_info, curr_boxes[i], curr_classes[i], threshold, interval, image_size))
     return velocities
 
 
-def get_moving_speed(prev_info, curr_box, curr_class, threshold, interval):
+def get_moving_speed(prev_info, curr_box, curr_class, threshold, interval, image_size):
     prev_boxes, prev_classes = prev_info
     closest_moving_box = None
     similarity = 9999
+
+    def get_rec_similarity(rec1, rec2):
+        (x1, y1, w1, h1) = rec1
+        (x2, y2, w2, h2) = rec2
+        return ((x1 - x2) ** 2 + (y1 - y2) ** 2 + (w1 - w2) ** 2 + (h1 - h2) ** 2) / 4
+
     for i in range(len(prev_boxes)):
         ts = get_rec_similarity(prev_boxes[i], curr_box)
         if ts < similarity and curr_class == prev_classes[i]:
             similarity = ts
             closest_moving_box = prev_boxes[i]
 
-    def get_center(box):
-        return box[0] + 0.5 * box[2], box[1] + 0.5 * box[3]
-
     if similarity < threshold:
-        prev_center = get_center(closest_moving_box)
-        curr_center = get_center(curr_box)
-        distance = np.sqrt((prev_center[0] - curr_center[0]) ** 2 + (prev_center[1] - curr_center[1]) ** 2)
-        speed = distance / interval
-        direction = get_speed_direction(prev_center, curr_center)
-        return speed, direction
-    return 0, ""
+        prev_center = get_center(closest_moving_box, image_size)
+        curr_center = get_center(curr_box, image_size)
+        angel_ground = CAMERA_INFO['angel_ground']
+        horizontal_dis = curr_center[0] - prev_center[0]
+        vertical_dis = (curr_center[1] - prev_center[1]) / math.cos(angel_ground)
+        print("horizontal_dis: {}, vertical_dis: {}".format(horizontal_dis, vertical_dis))
+        dis = np.sqrt(np.square(horizontal_dis) + np.square(vertical_dis))
+        speed = dis / interval
+        direction_x, direction_y = horizontal_dis / dis, vertical_dis / dis
+        return speed, (direction_x, direction_y)
+    return 0, (0, 0)
 
 
-def get_speed_direction(prev_center, curr_center):
-    return ""
-
-
-def get_rec_similarity(rec1, rec2):
-    (x1, y1, w1, h1) = rec1
-    (x2, y2, w2, h2) = rec2
-    return ((x1-x2) ** 2 + (y1-y2) ** 2 + (w1-w2) ** 2 + (h1-h2) ** 2) / 4
+def get_center(box, image_size):
+    top, left, bottom, right = box
+    top = max(0, np.floor(top + 0.5).astype('int32'))
+    left = max(0, np.floor(left + 0.5).astype('int32'))
+    bottom = min(image_size[1], np.floor(bottom + 0.5).astype('int32'))
+    right = min(image_size[0], np.floor(right + 0.5).astype('int32'))
+    return left + (right - left) / 2, top + (bottom - top) / 2

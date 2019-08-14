@@ -29,7 +29,9 @@ class YOLO(object):
         "model_image_size" : (416, 416),
         "gpu_num" : 1,
         "threshold" : 2000,
-        "interval": 1 / 24
+        "interval": 1 / 24,
+        "max_car_speed": 600,
+        "identical_line_length": 200,
     }
 
     @classmethod
@@ -137,7 +139,8 @@ class YOLO(object):
             out_boxes_velocities = get_out_boxes_velocities((prev_image_boxes, prev_image_classes),
                                                             (out_boxes, out_classes),
                                                             threshold,
-                                                            interval)
+                                                            interval,
+                                                            image.size)
 
         font = ImageFont.truetype(font='font/FiraMono-Medium.otf',
                     size=np.floor(3e-2 * image.size[1] + 0.5).astype('int32'))
@@ -147,12 +150,23 @@ class YOLO(object):
         for i, c in reversed(list(enumerate(out_classes))):
             predicted_class = self.class_names[c]
             box = out_boxes[i]
-            speed, direction = 0, ""
+            curr_box_center = get_center(box, image_size=image.size)
+            speed, direction_x, direction_y = 0, 0, 0
+            max_speed = YOLO.get_defaults("max_car_speed")
+            identical_line_length = YOLO.get_defaults("identical_line_length")
             if out_boxes_velocities:
-                speed, direction = out_boxes_velocities[i]
+                speed, (direction_x, direction_y) = out_boxes_velocities[i]
             score = out_scores[i]
+            line_length = identical_line_length * speed/max_speed
+            line_origin = (curr_box_center[0], curr_box_center[1])
+            if direction_y != 0:
+                angel = np.arctan(direction_x/direction_y)
+            else:
+                angel = np.pi / 2
+            line_end = (line_origin[0] + (-1 if direction_x < 0 else 1) * abs(np.sin(angel) * line_length),
+                        line_origin[1] + (-1 if direction_y < 0 else 1) * abs(np.cos(angel) * line_length))
 
-            label = '{} {:.2f} {:.2f} {}'.format(predicted_class, score, speed, direction)
+            label = '{} {:.2f} {:.2f} x: {:.2f} y: {:.2f}'.format(predicted_class, score, speed, direction_x, direction_y)
             draw = ImageDraw.Draw(image)
             label_size = draw.textsize(label, font)
 
@@ -175,6 +189,7 @@ class YOLO(object):
             draw.rectangle(
                 [tuple(text_origin), tuple(text_origin + label_size)],
                 fill=self.colors[c])
+            draw.line((line_origin[0], line_origin[1], line_end[0], line_end[1]), 'red')
             draw.text(text_origin, label, fill=(0, 0, 0), font=font)
             del draw
 
